@@ -10,7 +10,7 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "build": "npm --workspace=@splitwell/rules run build && npm --workspace=@splitwell/server run build && npm --workspace=@splitwell/web run build && rm -rf dist && cp -R apps/web/dist dist",
+    "build": "npm --workspace=@splitwell/web run build",
     "dev": "npm --workspace=@splitwell/server run dev",
     "start": "npm --workspace=@splitwell/server run start"
   },
