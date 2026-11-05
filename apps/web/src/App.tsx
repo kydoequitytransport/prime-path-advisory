@@ -121,13 +121,22 @@ export function App() {
   const wsRef = useRef<WebSocket | null>(null);
   const sessionRef = useRef<SavedSession | null>(null);
   const roomRef = useRef<RoomSnapshot | null>(null);
+  const reqSeqRef = useRef(0);
+  const latestAppliedSeqRef = useRef(0);
 
   useEffect(() => {
     roomRef.current = room;
   }, [room]);
 
-  const applyServerMessage = (data: Record<string, any>) => {
+  const applyServerMessage = (data: Record<string, any>, seq?: number) => {
     if (data.type === 'noop') return;
+    if (seq !== undefined) {
+      if (seq < latestAppliedSeqRef.current) {
+        // Ignore stale out-of-order HTTP responses so pieces never jump backward
+        return;
+      }
+      latestAppliedSeqRef.current = seq;
+    }
     if (data.type === 'joined') {
       setError(null);
       setYourSeat(data.seat);
@@ -155,6 +164,7 @@ export function App() {
   };
 
   const callHttpRoomApi = async (payload: Record<string, unknown>) => {
+    const seq = ++reqSeqRef.current;
     try {
       const res = await fetch('/api/room', {
         method: 'POST',
@@ -162,7 +172,7 @@ export function App() {
         body: JSON.stringify(payload)
       });
       const data = (await res.json()) as Record<string, any>;
-      applyServerMessage(data);
+      applyServerMessage(data, seq);
     } catch {
       // ignore transient network blip
     }

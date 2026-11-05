@@ -58,13 +58,6 @@ function ensureRoomEntry(
     if (token) {
       existing.room.syncSlotToken(validSeat, token);
     }
-    if (backupSnapshot && typeof backupSnapshot === 'object') {
-      existing.room.mergeFromSnapshot(
-        backupSnapshot as RoomSnapshot,
-        validSeat,
-        token
-      );
-    }
     return existing;
   }
 
