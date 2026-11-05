@@ -12,7 +12,7 @@ import {
   createSeededRng,
   receiveGarbageOnState,
   stepGravity
-} from '@splitwell/rules';
+} from '../../../packages/rules/src/index.js';
 
 export type SeatIndex = 0 | 1;
 export type RoomStatus = 'waiting' | 'playing' | 'finished';

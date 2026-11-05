@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { MatchRoom } from '../apps/server/src/room';
+import { MatchRoom } from '../apps/server/src/room.js';
 
 // Global in-memory room store across warm serverless invocations on the same instance
 const globalStore = globalThis as unknown as {
