@@ -1,0 +1,23 @@
+{
+  "name": "splitwell",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "npm --workspace=@splitwell/rules run build && npm --workspace=@splitwell/server run build && npm --workspace=@splitwell/web run build",
+    "dev": "npm --workspace=@splitwell/server run dev",
+    "start": "npm --workspace=@splitwell/server run start"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
