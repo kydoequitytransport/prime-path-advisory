@@ -44,6 +44,7 @@ interface SavedSession {
   code: string;
   token: string;
   name: string;
+  seat?: SeatIndex;
 }
 
 function getWsUrl(): string {
@@ -119,16 +120,24 @@ export function App() {
 
   const wsRef = useRef<WebSocket | null>(null);
   const sessionRef = useRef<SavedSession | null>(null);
+  const roomRef = useRef<RoomSnapshot | null>(null);
+
+  useEffect(() => {
+    roomRef.current = room;
+  }, [room]);
 
   const applyServerMessage = (data: Record<string, any>) => {
+    if (data.type === 'noop') return;
     if (data.type === 'joined') {
       setError(null);
       setYourSeat(data.seat);
       setRoom(data.room);
+      roomRef.current = data.room;
       const saved: SavedSession = {
         code: data.code,
         token: data.token,
-        name: playerName
+        name: playerName,
+        seat: data.seat
       };
       sessionRef.current = saved;
       sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(saved));
@@ -136,8 +145,10 @@ export function App() {
       url.searchParams.set('room', data.code);
       window.history.replaceState({}, '', url.toString());
     } else if (data.type === 'snapshot') {
+      setError(null);
       setYourSeat(data.yourSeat);
       setRoom(data.room);
+      roomRef.current = data.room;
     } else if (data.type === 'error') {
       setError(data.message ?? 'Unexpected server error');
     }
@@ -246,17 +257,26 @@ export function App() {
   // Poll room state automatically when running on serverless HTTP transport (e.g. Vercel)
   useEffect(() => {
     if (!httpFallbackMode || !room) return;
-    const interval = setInterval(() => {
+    let inFlight = false;
+    const interval = setInterval(async () => {
+      if (inFlight) return;
       const saved = sessionRef.current;
       if (!saved) return;
-      void callHttpRoomApi({
-        type: 'poll',
-        code: saved.code,
-        token: saved.token
-      });
-    }, 180);
+      inFlight = true;
+      try {
+        await callHttpRoomApi({
+          type: 'poll',
+          code: saved.code,
+          token: saved.token,
+          seat: saved.seat ?? yourSeat ?? 0,
+          snapshot: roomRef.current
+        });
+      } finally {
+        inFlight = false;
+      }
+    }, 320);
     return () => clearInterval(interval);
-  }, [httpFallbackMode, room?.code, room?.status]);
+  }, [httpFallbackMode, room?.code, room?.status, yourSeat]);
 
   const sendIntent = (intent: PlayerIntent) => {
     if (!httpFallbackMode && wsRef.current?.readyState === WebSocket.OPEN) {
@@ -269,6 +289,8 @@ export function App() {
         type: 'intent',
         code: saved.code,
         token: saved.token,
+        seat: saved.seat ?? yourSeat ?? 0,
+        snapshot: roomRef.current,
         intent
       });
     }

@@ -1,9 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { MatchRoom } from '../apps/server/src/room.js';
+import { MatchRoom, RoomSnapshot, SeatIndex } from '../apps/server/src/room.js';
 
-// Global in-memory room store across warm serverless invocations on the same instance
 const globalStore = globalThis as unknown as {
-  __splitwellRooms?: Map<string, { room: MatchRoom; lastTickMs: number }>;
+  __splitwellRooms?: Map<string, { room: MatchRoom; lastTickMs: number; version: number }>;
 };
 
 if (!globalStore.__splitwellRooms) {
@@ -24,7 +23,10 @@ function generateRoomCode(): string {
   return `RM${Date.now().toString(36).slice(-4).toUpperCase()}`;
 }
 
-function advanceTicksIfNeeded(entry: { room: MatchRoom; lastTickMs: number }, now: number) {
+function advanceTicksIfNeeded(
+  entry: { room: MatchRoom; lastTickMs: number; version: number },
+  now: number
+) {
   const { room } = entry;
   if (room.status !== 'playing') {
     entry.lastTickMs = now;
@@ -32,13 +34,51 @@ function advanceTicksIfNeeded(entry: { room: MatchRoom; lastTickMs: number }, no
   }
   const tickMs = 550;
   const elapsed = now - entry.lastTickMs;
-  const ticks = Math.min(Math.floor(elapsed / tickMs), 8);
+  const ticks = Math.min(Math.floor(elapsed / tickMs), 6);
   if (ticks > 0) {
     for (let i = 0; i < ticks; i++) {
       room.tickGravity();
     }
     entry.lastTickMs += ticks * tickMs;
+    entry.version += ticks;
   }
+}
+
+function ensureRoomEntry(
+  rawCode: string,
+  token: string,
+  seatHint: unknown,
+  backupSnapshot: unknown,
+  now: number
+): { room: MatchRoom; lastTickMs: number; version: number } | undefined {
+  const existing = rooms.get(rawCode);
+  const validSeat: SeatIndex = seatHint === 1 ? 1 : 0;
+
+  if (existing) {
+    if (token) {
+      existing.room.syncSlotToken(validSeat, token);
+    }
+    if (backupSnapshot && typeof backupSnapshot === 'object') {
+      existing.room.mergeFromSnapshot(
+        backupSnapshot as RoomSnapshot,
+        validSeat,
+        token
+      );
+    }
+    return existing;
+  }
+
+  if (backupSnapshot && typeof backupSnapshot === 'object') {
+    const snap = backupSnapshot as RoomSnapshot;
+    if (snap.code === rawCode && Array.isArray(snap.players)) {
+      const restored = MatchRoom.fromSnapshot(snap, validSeat, token);
+      const created = { room: restored, lastTickMs: now, version: 1 };
+      rooms.set(rawCode, created);
+      return created;
+    }
+  }
+
+  return undefined;
 }
 
 export default async function handler(
@@ -78,7 +118,6 @@ export default async function handler(
   if (action === 'create_room') {
     const name = typeof body.name === 'string' ? body.name : undefined;
     const code = generateRoomCode();
-    // Use manual tick advancement in serverless mode (gravityIntervalMs very high so timer doesn't leak)
     const room = new MatchRoom({ code, gravityIntervalMs: 600_000 });
     room.stopTimers();
     const joined = room.addOrReconnectPlayer({ name });
@@ -88,7 +127,7 @@ export default async function handler(
       res.end(JSON.stringify({ type: 'error', message: joined.error }));
       return;
     }
-    rooms.set(code, { room, lastTickMs: now });
+    rooms.set(code, { room, lastTickMs: now, version: 1 });
     res.statusCode = 200;
     res.end(
       JSON.stringify({
@@ -105,9 +144,9 @@ export default async function handler(
   if (action === 'join_room') {
     const rawCode = typeof body.code === 'string' ? body.code.trim().toUpperCase() : '';
     const name = typeof body.name === 'string' ? body.name : undefined;
-    const token = typeof body.token === 'string' ? body.token : undefined;
+    const token = typeof body.token === 'string' ? body.token : '';
 
-    const entry = rooms.get(rawCode);
+    const entry = ensureRoomEntry(rawCode, token, body.seat, body.snapshot, now);
     if (!entry) {
       res.statusCode = 404;
       res.end(
@@ -120,7 +159,7 @@ export default async function handler(
     }
 
     const prevStatus = entry.room.status;
-    const joined = entry.room.addOrReconnectPlayer({ token, name });
+    const joined = entry.room.addOrReconnectPlayer({ token: token || undefined, name });
     entry.room.stopTimers();
     if ('error' in joined) {
       res.statusCode = 400;
@@ -148,10 +187,10 @@ export default async function handler(
   if (action === 'intent') {
     const rawCode = typeof body.code === 'string' ? body.code.trim().toUpperCase() : '';
     const token = typeof body.token === 'string' ? body.token : '';
-    const entry = rooms.get(rawCode);
+    const entry = ensureRoomEntry(rawCode, token, body.seat, body.snapshot, now);
     if (!entry) {
-      res.statusCode = 404;
-      res.end(JSON.stringify({ type: 'error', message: 'Room not found.' }));
+      res.statusCode = 200;
+      res.end(JSON.stringify({ type: 'noop' }));
       return;
     }
     advanceTicksIfNeeded(entry, now);
@@ -161,7 +200,7 @@ export default async function handler(
     res.end(
       JSON.stringify({
         type: 'snapshot',
-        yourSeat: slot?.seat ?? 0,
+        yourSeat: slot?.seat ?? (body.seat === 1 ? 1 : 0),
         room: entry.room.getSnapshot()
       })
     );
@@ -171,10 +210,10 @@ export default async function handler(
   if (action === 'poll') {
     const rawCode = typeof body.code === 'string' ? body.code.trim().toUpperCase() : '';
     const token = typeof body.token === 'string' ? body.token : '';
-    const entry = rooms.get(rawCode);
+    const entry = ensureRoomEntry(rawCode, token, body.seat, body.snapshot, now);
     if (!entry) {
-      res.statusCode = 404;
-      res.end(JSON.stringify({ type: 'error', message: 'Room not found.' }));
+      res.statusCode = 200;
+      res.end(JSON.stringify({ type: 'noop' }));
       return;
     }
     advanceTicksIfNeeded(entry, now);
@@ -183,7 +222,7 @@ export default async function handler(
     res.end(
       JSON.stringify({
         type: 'snapshot',
-        yourSeat: slot?.seat ?? 0,
+        yourSeat: slot?.seat ?? (body.seat === 1 ? 1 : 0),
         room: entry.room.getSnapshot()
       })
     );

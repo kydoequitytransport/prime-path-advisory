@@ -376,4 +376,114 @@ export class MatchRoom {
   private notify(): void {
     this.onBroadcast?.(this);
   }
+
+  public static fromSnapshot(
+    snapshot: RoomSnapshot,
+    callerSeat: SeatIndex,
+    callerToken: string
+  ): MatchRoom {
+    const room = new MatchRoom({
+      code: snapshot.code,
+      seed: snapshot.seed,
+      gravityIntervalMs: 600_000
+    });
+    room.stopTimers();
+    room.status = snapshot.status;
+    room.winnerSeat = snapshot.winnerSeat;
+    room.finishReason = snapshot.finishReason;
+
+    for (const seat of [0, 1] as const) {
+      const p = snapshot.players[seat];
+      if (!p) continue;
+      room.slots[seat] = {
+        seat,
+        token: seat === callerSeat ? callerToken : `peer-${seat}`,
+        name: p.name,
+        connected: p.connected,
+        disconnectDeadlineMs: p.disconnectDeadlineMs,
+        disconnectTimer: null,
+        state: {
+          board: p.board.map((row) => [...row]),
+          active: { ...p.active },
+          pieceIndex: p.pieceIndex,
+          linesCleared: p.linesCleared,
+          score: p.score,
+          alive: p.alive
+        },
+        lastIntentTimestamps: []
+      };
+    }
+    return room;
+  }
+
+  public syncSlotToken(seat: SeatIndex, token: string): void {
+    const slot = this.slots[seat];
+    if (slot && token) {
+      slot.token = token;
+    }
+  }
+
+  public mergeFromSnapshot(
+    snapshot: RoomSnapshot,
+    callerSeat: SeatIndex,
+    callerToken: string
+  ): void {
+    if (this.status === 'waiting' && snapshot.status !== 'waiting') {
+      this.status = snapshot.status;
+    }
+    if (snapshot.status === 'finished' && this.status !== 'finished') {
+      this.status = 'finished';
+      this.winnerSeat = snapshot.winnerSeat;
+      this.finishReason = snapshot.finishReason;
+    }
+
+    for (const seat of [0, 1] as const) {
+      const incoming = snapshot.players[seat];
+      if (!incoming) continue;
+      const current = this.slots[seat];
+      if (!current) {
+        this.slots[seat] = {
+          seat,
+          token: seat === callerSeat && callerToken ? callerToken : `peer-${seat}`,
+          name: incoming.name,
+          connected: incoming.connected,
+          disconnectDeadlineMs: incoming.disconnectDeadlineMs,
+          disconnectTimer: null,
+          state: {
+            board: incoming.board.map((row) => [...row]),
+            active: { ...incoming.active },
+            pieceIndex: incoming.pieceIndex,
+            linesCleared: incoming.linesCleared,
+            score: incoming.score,
+            alive: incoming.alive
+          },
+          lastIntentTimestamps: []
+        };
+        continue;
+      }
+
+      if (seat === callerSeat && callerToken) {
+        current.token = callerToken;
+      }
+
+      // Adopt incoming seat state if it is further ahead or belongs to the caller
+      const incomingAhead =
+        incoming.pieceIndex > current.state.pieceIndex ||
+        (incoming.pieceIndex === current.state.pieceIndex &&
+          incoming.active.y > current.state.active.y) ||
+        !incoming.alive;
+
+      if (seat === callerSeat || incomingAhead) {
+        current.state = {
+          board: incoming.board.map((row) => [...row]),
+          active: { ...incoming.active },
+          pieceIndex: incoming.pieceIndex,
+          linesCleared: Math.max(current.state.linesCleared, incoming.linesCleared),
+          score: Math.max(current.state.score, incoming.score),
+          alive: incoming.alive && current.state.alive
+        };
+      }
+    }
+    this.checkOutcome();
+  }
 }
