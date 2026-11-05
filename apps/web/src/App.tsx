@@ -114,10 +114,48 @@ export function App() {
   const [room, setRoom] = useState<RoomSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
+  const [httpFallbackMode, setHttpFallbackMode] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const sessionRef = useRef<SavedSession | null>(null);
+
+  const applyServerMessage = (data: Record<string, any>) => {
+    if (data.type === 'joined') {
+      setError(null);
+      setYourSeat(data.seat);
+      setRoom(data.room);
+      const saved: SavedSession = {
+        code: data.code,
+        token: data.token,
+        name: playerName
+      };
+      sessionRef.current = saved;
+      sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(saved));
+      const url = new URL(window.location.href);
+      url.searchParams.set('room', data.code);
+      window.history.replaceState({}, '', url.toString());
+    } else if (data.type === 'snapshot') {
+      setYourSeat(data.yourSeat);
+      setRoom(data.room);
+    } else if (data.type === 'error') {
+      setError(data.message ?? 'Unexpected server error');
+    }
+  };
+
+  const callHttpRoomApi = async (payload: Record<string, unknown>) => {
+    try {
+      const res = await fetch('/api/room', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = (await res.json()) as Record<string, any>;
+      applyServerMessage(data);
+    } catch {
+      // ignore transient network blip
+    }
+  };
 
   useEffect(() => {
     try {
@@ -132,76 +170,107 @@ export function App() {
 
   useEffect(() => {
     let closedByUnmount = false;
-    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+    let openedOnce = false;
 
-    function connect() {
-      const ws = new WebSocket(getWsUrl());
-      wsRef.current = ws;
+    const ws = new WebSocket(getWsUrl());
+    wsRef.current = ws;
 
-      ws.onopen = () => {
+    const fallbackTimer = setTimeout(() => {
+      if (!openedOnce && !closedByUnmount) {
+        setHttpFallbackMode(true);
         setWsConnected(true);
-        // Automatically rejoin active room if socket reconnected mid-match
+      }
+    }, 1200);
+
+    ws.onopen = () => {
+      openedOnce = true;
+      clearTimeout(fallbackTimer);
+      setHttpFallbackMode(false);
+      setWsConnected(true);
+      const saved = sessionRef.current;
+      if (saved) {
+        ws.send(
+          JSON.stringify({
+            type: 'join_room',
+            code: saved.code,
+            token: saved.token,
+            name: saved.name
+          })
+        );
+      }
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(String(event.data));
+        applyServerMessage(data);
+      } catch {
+        // ignore malformed messages
+      }
+    };
+
+    ws.onerror = () => {
+      if (!openedOnce && !closedByUnmount) {
+        clearTimeout(fallbackTimer);
+        setHttpFallbackMode(true);
+        setWsConnected(true);
+      }
+    };
+
+    ws.onclose = () => {
+      if (!openedOnce && !closedByUnmount) {
+        clearTimeout(fallbackTimer);
+        setHttpFallbackMode(true);
+        setWsConnected(true);
         const saved = sessionRef.current;
         if (saved) {
-          ws.send(
-            JSON.stringify({
-              type: 'join_room',
-              code: saved.code,
-              token: saved.token,
-              name: saved.name
-            })
-          );
+          void callHttpRoomApi({
+            type: 'join_room',
+            code: saved.code,
+            token: saved.token,
+            name: saved.name
+          });
         }
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(String(event.data));
-          if (data.type === 'joined') {
-            setError(null);
-            setYourSeat(data.seat);
-            setRoom(data.room);
-            const saved: SavedSession = {
-              code: data.code,
-              token: data.token,
-              name: playerName
-            };
-            sessionRef.current = saved;
-            sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(saved));
-            const url = new URL(window.location.href);
-            url.searchParams.set('room', data.code);
-            window.history.replaceState({}, '', url.toString());
-          } else if (data.type === 'snapshot') {
-            setYourSeat(data.yourSeat);
-            setRoom(data.room);
-          } else if (data.type === 'error') {
-            setError(data.message ?? 'Unexpected server error');
-          }
-        } catch {
-          // ignore malformed messages
-        }
-      };
-
-      ws.onclose = () => {
+      } else if (!closedByUnmount) {
         setWsConnected(false);
-        if (!closedByUnmount) {
-          reconnectTimeout = setTimeout(connect, 1200);
-        }
-      };
-    }
-
-    connect();
+      }
+    };
 
     return () => {
       closedByUnmount = true;
-      if (reconnectTimeout) clearTimeout(reconnectTimeout);
-      wsRef.current?.close();
+      clearTimeout(fallbackTimer);
+      ws.close();
     };
   }, []);
 
+  // Poll room state automatically when running on serverless HTTP transport (e.g. Vercel)
+  useEffect(() => {
+    if (!httpFallbackMode || !room) return;
+    const interval = setInterval(() => {
+      const saved = sessionRef.current;
+      if (!saved) return;
+      void callHttpRoomApi({
+        type: 'poll',
+        code: saved.code,
+        token: saved.token
+      });
+    }, 180);
+    return () => clearInterval(interval);
+  }, [httpFallbackMode, room?.code, room?.status]);
+
   const sendIntent = (intent: PlayerIntent) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
+    if (!httpFallbackMode && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'intent', intent }));
+      return;
+    }
+    const saved = sessionRef.current;
+    if (saved) {
+      void callHttpRoomApi({
+        type: 'intent',
+        code: saved.code,
+        token: saved.token,
+        intent
+      });
     }
   };
 
@@ -251,18 +320,18 @@ export function App() {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [room]);
+  }, [room, httpFallbackMode]);
 
   const handleCreateRoom = () => {
     setError(null);
     sessionRef.current = null;
     sessionStorage.removeItem(SESSION_STORAGE_KEY);
-    wsRef.current?.send(
-      JSON.stringify({
-        type: 'create_room',
-        name: playerName.trim() || 'Player 1'
-      })
-    );
+    const name = playerName.trim() || 'Player 1';
+    if (!httpFallbackMode && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'create_room', name }));
+    } else {
+      void callHttpRoomApi({ type: 'create_room', name });
+    }
   };
 
   const handleJoinRoom = (e: React.FormEvent) => {
@@ -273,17 +342,25 @@ export function App() {
       return;
     }
     setError(null);
-    wsRef.current?.send(
-      JSON.stringify({
-        type: 'join_room',
-        code,
-        name: playerName.trim() || 'Player 2'
-      })
-    );
+    const name = playerName.trim() || 'Player 2';
+    if (!httpFallbackMode && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'join_room', code, name }));
+    } else {
+      void callHttpRoomApi({ type: 'join_room', code, name });
+    }
   };
 
   const handleLeaveRoom = () => {
-    wsRef.current?.send(JSON.stringify({ type: 'leave_room' }));
+    const saved = sessionRef.current;
+    if (!httpFallbackMode && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'leave_room' }));
+    } else if (saved) {
+      void callHttpRoomApi({
+        type: 'leave_room',
+        code: saved.code,
+        token: saved.token
+      });
+    }
     sessionRef.current = null;
     sessionStorage.removeItem(SESSION_STORAGE_KEY);
     setRoom(null);
@@ -319,7 +396,7 @@ export function App() {
             title={wsConnected ? 'Connected to server' : 'Reconnecting...'}
           />
           <span style={{ fontSize: '0.85rem', color: 'var(--muted)' }}>
-            {wsConnected ? 'Live Socket' : 'Reconnecting...'}
+            {wsConnected ? 'Live Server' : 'Reconnecting...'}
           </span>
           {room && (
             <button className="btn btn-danger" onClick={handleLeaveRoom}>

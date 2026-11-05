@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "tsc -p ../../packages/rules/tsconfig.json && tsc -p ../../apps/server/tsconfig.json && vite build && rm -rf ../../dist && cp -R dist ../../dist",
     "preview": "vite preview"
   },
   "dependencies": {
